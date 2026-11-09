@@ -1,5 +1,22 @@
 # AGENTS.md
 
+## This project
+
+Event ingest service: API process (`src/main.ts`) publishes validated events to RabbitMQ; worker process (`src/worker.ts`) claims them in MongoDB, calls a (simulated) slow external system and records the result. Read `docs/ARCHITECTURE.md` before changing delivery, ordering or retry behaviour, and keep `docs/HANDOFF.md` (state, gotchas) up to date.
+
+Commands (package manager is Bun, `bun.lock`): `bun run build`, `bun run lint`, `bun run test` (unit, no infra), `bun run test:e2e` (needs `docker compose up -d mongo rabbitmq`), `bun run start:dev` / `bun run start:worker:dev`.
+
+Conventions:
+
+- Never process or call the external system in the HTTP request. The API only validates, publishes with confirm, and answers 202.
+- Delivery is at-least-once: all processing must stay idempotent. State changes go through `EventsRepository`; writes after `claim` are fenced by `attempts`. Ack a message only after its outcome is durable.
+- Retries go through the TTL retry queues, never `nack(requeue)` on the failure path.
+- Request/response shapes are Zod schemas (`StandardSchemaValidationPipe`, `@Body({ schema })`). The OpenAPI document and Scalar page (`/openapi.json`, `/docs`) are generated from controllers and `ingest.docs.ts`: when an endpoint, field or status code changes, update the decorators, the schemas, the OpenAPI assertion in `events.controller.spec.ts` and the README endpoint table.
+- Config comes from `src/config/env.ts` (validated at startup) through `ConfigService<Env, true>`; do not read `process.env` elsewhere.
+- Controllers stay thin. No new abstraction without a second use. Comments explain why, not what.
+- Tests that touch ordering, duplicates, retries or crashes belong in `test/` against real MongoDB/RabbitMQ; pure logic gets a unit test next to the file.
+- Commits: `<type>: <imperative summary>` (feat, fix, refactor, chore, test, docs, style), English, under 72 characters, one logical change each, no co-author or tool attribution lines.
+
 ## NestJS
 
 This app's version of NestJS is likely newer than what you know. https://docs.nestjs.com/llms.txt indexes its documentation, with a markdown page per chapter.
