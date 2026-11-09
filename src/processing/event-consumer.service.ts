@@ -76,7 +76,18 @@ export class EventConsumer
       this.logger.error(
         `Could not settle message, requeueing: ${String(error)}`,
       );
+      this.requeue(message);
+    }
+  }
+
+  /** Best effort: if the channel is gone the broker redelivers the message anyway. */
+  private requeue(message: ConsumeMessage): void {
+    try {
       this.broker.channel.nack(message, false, true);
+    } catch (error) {
+      this.logger.warn(
+        `Could not nack, relying on broker redelivery: ${String(error)}`,
+      );
     }
   }
 

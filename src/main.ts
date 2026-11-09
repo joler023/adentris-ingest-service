@@ -1,10 +1,8 @@
-import { StandardSchemaValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ApiModule } from './api.module.js';
-import { setupApiDocs } from './ingest/api-docs.js';
+import { configureApi } from './configure-api.js';
 
 const app = await NestFactory.create(ApiModule);
-app.useGlobalPipes(new StandardSchemaValidationPipe());
+configureApi(app);
 app.enableShutdownHooks();
-setupApiDocs(app);
 await app.listen(process.env.PORT ?? 3000);
