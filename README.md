@@ -1,132 +1,100 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Ingest Service
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Accepts patient events over HTTP, answers immediately, and processes them
+asynchronously (a ~5 s call to a slow external system) with MongoDB as the
+source of truth. Built to survive duplicates, retries, out-of-order delivery and
+processes dying at any moment.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+NestJS 12 · MongoDB · RabbitMQ · two processes (API, worker) from one codebase.
 
-## Description
+- Design, reasoning and trade-offs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- State of the project and how to continue: [docs/HANDOFF.md](docs/HANDOFF.md)
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Run it
 
-## Project setup
+Requires Docker (and [Bun](https://bun.sh) only for local development).
 
 ```bash
-$ bun install
+docker compose up --build
 ```
 
-## Compile and run the project
+This starts MongoDB, RabbitMQ, the API on <http://localhost:3000> and one worker.
+RabbitMQ's management UI is on <http://localhost:15672> (guest / guest).
 
 ```bash
-# development
-$ bun run start
+curl -i -X POST localhost:3000/events -H 'content-type: application/json' \
+  -d '{"patientId":"patient-42","type":"heart-rate","data":{"bpm":72},"ts":"2026-11-08T10:15:30Z"}'
+# HTTP/1.1 202 Accepted   {"eventKey":"<sha256>"}
 
-# watch mode
-$ bun run start:dev
-
-# production mode
-$ bun run start:prod
+curl localhost:3000/events/<eventKey>
+# a few seconds later: "status":"COMPLETED", "attempts":1, "result":{...}
 ```
 
-## Run tests
+### API documentation
+
+| URL | What |
+|---|---|
+| <http://localhost:3000/docs> | Interactive reference, rendered by [Scalar](https://scalar.com) (its script is loaded from a CDN, so the page needs internet access) |
+| <http://localhost:3000/openapi.json> | The raw OpenAPI 3 document, generated from the controllers and Zod schemas |
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `POST /events` | `202` `{eventKey}`, after the broker confirmed the event | `400` invalid body, `503` broker did not confirm (nothing accepted, retry) |
+| `GET /events/:eventKey` | `200` state, attempts, result | `400` malformed key, `404` not picked up yet |
+
+### Local development
 
 ```bash
-# unit tests
-$ bun run test
-
-# e2e tests
-$ bun run test:e2e
-
-# test coverage
-$ bun run test:cov
+bun install
+docker compose up -d mongo rabbitmq   # infrastructure only
+cp .env.example .env                  # optional, defaults already match
+bun run start:dev                     # API   (terminal 1)
+bun run start:worker:dev              # worker (terminal 2)
 ```
 
-## Deployment
+Production build: `bun run build`, then `bun run start:prod` and `bun run start:worker:prod`.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### Watch it hold up
 
 ```bash
-$ bun install -g @nestjs/mau
-$ mau deploy
+bun run load -- --rate 1000 --seconds 60 --patients 500 --duplicates 0.1
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Sends 1000 events/min for a minute (10 % of them duplicates, timestamps shuffled
+over 10 minutes), then waits until every distinct event is terminal and prints
+accept latency, completed/failed counts, retries and out-of-order events. For a
+retry/dead-letter demo run the worker with `EXTERNAL_FAILURE_RATE=0.1`. Try
+`docker compose kill worker` mid-run and start it again: nothing is lost.
+With `docker compose up --scale worker=2` the second worker is a hot standby
+(see ARCHITECTURE.md, "Scaling").
 
-## Observability
-
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
-
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-To add it to this project, run this and approve the code it prints at [observe.nestjs.com/link](https://observe.nestjs.com/link) - signing up for free if you have no account:
+## Tests
 
 ```bash
-$ npx @nestjs/observe link
+bun run test        # unit tests, no infrastructure needed
+bun run test:e2e    # integration tests: needs `docker compose up -d mongo rabbitmq`
+bun run lint
 ```
 
-It installs `@nestjs/observe`, wires it into `AppModule` and `main.ts`, and writes the app key and secret into `.env`, which every `nest start` script (`start`, `start:dev`, `start:debug`) then loads. In production, set `OBSERVE_APP_KEY` and `OBSERVE_APP_SECRET` in the environment instead.
+The integration tests use real MongoDB and RabbitMQ in an isolated vhost and
+database (recreated on every run) and cover: 202 returned while processing is
+still running, an accepted event waiting in the broker until a worker exists,
+duplicates processed once, redelivery of a completed event, parallelism across
+patients, no overlap within a patient (even with two workers), retries, the
+dead-letter queue, malformed messages, out-of-order flagging, and a worker dying
+mid-processing.
 
-Or do it by hand:
+## Configuration
 
-```bash
-$ bun install @nestjs/observe
-```
+Environment variables (see [.env.example](.env.example)); invalid values stop the process at startup.
 
-Then follow the [setup guide](https://docs.nestjs.com/observability/sdk) - it takes a single import and an app key.
-
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` | `3000` | API port |
+| `MONGODB_URI` / `RABBITMQ_URL` | localhost | Connections |
+| `PARTITIONS` | `256` | Per-patient queues. Same value in API and worker; see ARCHITECTURE.md before changing it |
+| `RETRY_DELAYS_MS` | `5000,30000,120000` | Backoff between attempts; max attempts = delays + 1 |
+| `EXTERNAL_PROCESSING_MS` | `5000` | Simulated external call duration |
+| `EXTERNAL_FAILURE_RATE` | `0` | Probability (0-1) that the simulated call fails |
+| `EXTERNAL_TIMEOUT_MS` | `20000` | Upper bound of the external call |
+| `LEASE_MS` | `30000` | How long a worker owns an event; must exceed the timeout. Also the worst-case crash recovery time |
