@@ -9,6 +9,7 @@ NestJS 12 · MongoDB · RabbitMQ · two processes (API, worker) from one codebas
 
 - Design, reasoning and trade-offs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - State of the project and how to continue: [docs/HANDOFF.md](docs/HANDOFF.md)
+- Contributing (workflow, tests, commit conventions): [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Run it
 
