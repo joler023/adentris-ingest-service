@@ -41,6 +41,16 @@ curl localhost:3000/events/<eventKey>
 |---|---|---|
 | `POST /events` | `202` `{eventKey}`, after the broker confirmed the event | `400` invalid body, `503` broker did not confirm (nothing accepted, retry) |
 | `GET /events/:eventKey` | `200` state, attempts, result | `400` malformed key, `404` not picked up yet |
+| `GET /health` | `200` MongoDB and RabbitMQ reachable | `503` a dependency is down or the process is shutting down |
+
+### Health and logs
+
+`GET /health` on the API (port 3000) and on the worker (port 3001) checks MongoDB
+and RabbitMQ; Docker Compose uses it as the container healthcheck
+(`docker compose ps` shows `healthy`). Logs are JSON, one object per line on
+stdout (`docker compose logs -f api worker`); filter with `NEST_LOG_LEVEL`, e.g.
+`NEST_LOG_LEVEL=">=log"` hides the `debug` lines. Patient identifiers and event
+data are never logged. Details: ARCHITECTURE.md, "Health and logging".
 
 ### Local development
 
@@ -91,6 +101,8 @@ Environment variables (see [.env.example](.env.example)); invalid values stop th
 | Variable | Default | Meaning |
 |---|---|---|
 | `PORT` | `3000` | API port |
+| `WORKER_PORT` | `3001` | Worker port, serves only `GET /health` |
+| `NEST_LOG_LEVEL` | all | Log filter, e.g. `warn` or `>=log` |
 | `MONGODB_URI` / `RABBITMQ_URL` | localhost | Connections |
 | `PARTITIONS` | `256` | Per-patient queues. Same value in API and worker; see ARCHITECTURE.md before changing it |
 | `RETRY_DELAYS_MS` | `5000,30000,120000` | Backoff between attempts; max attempts = delays + 1 |

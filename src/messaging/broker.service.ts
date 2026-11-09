@@ -1,4 +1,4 @@
-import { Injectable, OnApplicationShutdown } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { ConfirmChannel } from 'amqplib';
 import {
@@ -23,6 +23,7 @@ const PUBLISH_TIMEOUT_MS = 5_000;
 /** Owns the RabbitMQ connection. Every publish resolves only once the broker confirmed it. */
 @Injectable()
 export class BrokerService implements OnApplicationShutdown {
+  private readonly logger = new Logger(BrokerService.name);
   private readonly connection: AmqpConnectionManager;
   readonly channel: ChannelWrapper;
   private readonly partitions: number;
@@ -32,6 +33,13 @@ export class BrokerService implements OnApplicationShutdown {
     this.partitions = config.get('PARTITIONS', { infer: true });
     this.retryDelaysMs = config.get('RETRY_DELAYS_MS', { infer: true });
     this.connection = connect([config.get('RABBITMQ_URL', { infer: true })]);
+    // Never log the URL: it carries the credentials.
+    this.connection.on('connect', () => this.logger.log('RabbitMQ connected'));
+    this.connection.on('disconnect', ({ err }) =>
+      this.logger.warn('RabbitMQ disconnected, reconnecting', {
+        reason: err?.message,
+      }),
+    );
     this.channel = this.connection.createChannel({
       publishTimeout: PUBLISH_TIMEOUT_MS,
       setup: (channel: ConfirmChannel) =>
@@ -40,6 +48,10 @@ export class BrokerService implements OnApplicationShutdown {
           retryDelaysMs: this.retryDelaysMs,
         }),
     });
+  }
+
+  isConnected(): boolean {
+    return this.connection.isConnected();
   }
 
   /** Resolves once connected and the topology exists. */

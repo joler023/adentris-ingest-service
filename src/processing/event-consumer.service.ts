@@ -6,7 +6,9 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { ConsumeMessage } from 'amqplib';
+import { ZodError } from 'zod';
 import type { Env } from '../config/env.js';
+import { reasonOf } from '../logger.js';
 import { EventMessage, eventMessageSchema } from '../events/event-message.js';
 import { BrokerService } from '../messaging/broker.service.js';
 import { partitionQueue, RETRIES_HEADER } from '../messaging/topology.js';
@@ -44,17 +46,24 @@ export class EventConsumer
         { prefetch: 1 },
       );
     }
-    this.logger.log(`Consuming ${this.partitions} partition queues`);
+    this.logger.log('Consuming partition queues', {
+      partitions: this.partitions,
+    });
   }
 
   /** Stop taking new messages, let the running ones finish; anything left is redelivered after the lease. */
   async beforeApplicationShutdown(): Promise<void> {
+    this.logger.log('Shutting down, draining in-flight events', {
+      inFlight: this.inFlight.size,
+    });
     await this.broker.channel.cancelAll();
     const drained = Promise.allSettled(this.inFlight);
     const timeout = new Promise((resolve) =>
       setTimeout(resolve, SHUTDOWN_DRAIN_MS).unref(),
     );
     await Promise.race([drained, timeout]);
+    // Anything left is redelivered by the broker and taken over after its lease.
+    this.logger.log('Drain finished', { abandoned: this.inFlight.size });
   }
 
   private track(message: ConsumeMessage): void {
@@ -73,9 +82,9 @@ export class EventConsumer
       this.broker.channel.ack(message);
     } catch (error) {
       // Broker or database trouble while settling: the message goes back, the lease protects the event.
-      this.logger.error(
-        `Could not settle message, requeueing: ${String(error)}`,
-      );
+      this.logger.error('Could not settle message, requeueing', {
+        reason: reasonOf(error),
+      });
       this.requeue(message);
     }
   }
@@ -85,9 +94,9 @@ export class EventConsumer
     try {
       this.broker.channel.nack(message, false, true);
     } catch (error) {
-      this.logger.warn(
-        `Could not nack, relying on broker redelivery: ${String(error)}`,
-      );
+      this.logger.warn('Could not nack, relying on broker redelivery', {
+        reason: reasonOf(error),
+      });
     }
   }
 
@@ -95,9 +104,14 @@ export class EventConsumer
     try {
       return eventMessageSchema.parse(JSON.parse(message.content.toString()));
     } catch (error) {
-      this.logger.error(
-        `Unparseable message moved to the dead-letter queue: ${String(error)}`,
-      );
+      // Not the error text: JSON.parse quotes a snippet of the payload.
+      this.logger.error('Unparseable message moved to the dead-letter queue', {
+        reason: error instanceof ZodError ? 'schema mismatch' : 'invalid JSON',
+        fields:
+          error instanceof ZodError
+            ? error.issues.map((i) => i.path.join('.'))
+            : undefined,
+      });
       return undefined;
     }
   }
@@ -107,9 +121,10 @@ export class EventConsumer
     try {
       return await this.processor.process(event);
     } catch (error) {
-      this.logger.error(
-        `Event ${event.eventKey} could not be processed: ${String(error)}`,
-      );
+      this.logger.error('Event could not be processed, delaying it', {
+        eventKey: event.eventKey,
+        reason: reasonOf(error),
+      });
       return 'retry';
     }
   }

@@ -12,6 +12,7 @@ Conventions:
 - Delivery is at-least-once: all processing must stay idempotent. State changes go through `EventsRepository`; writes after `claim` are fenced by `attempts`. Ack a message only after its outcome is durable.
 - Retries go through the TTL retry queues, never `nack(requeue)` on the failure path.
 - Request/response shapes are Zod schemas (`StandardSchemaValidationPipe`, `@Body({ schema })`). The OpenAPI document and Scalar page (`/openapi.json`, `/docs`) are generated from controllers and `ingest.docs.ts`: when an endpoint, field or status code changes, update the decorators, the schemas, the OpenAPI assertion in `events.controller.spec.ts` and the README endpoint table.
+- Logs are structured (`logger.log('msg', { eventKey })`) and must never contain `patientId`, event `data`, results, connection URLs or raw error objects: use `reasonOf(error)`. `GET /health` (both processes) must keep checking every critical dependency; a new one gets an indicator and a test.
 - Config comes from `src/config/env.ts` (validated at startup) through `ConfigService<Env, true>`; do not read `process.env` elsewhere.
 - Controllers stay thin. No new abstraction without a second use. Comments explain why, not what.
 - Tests that touch ordering, duplicates, retries or crashes belong in `test/` against real MongoDB/RabbitMQ; pure logic gets a unit test next to the file.

@@ -27,6 +27,15 @@ describe('ingest API (real MongoDB + RabbitMQ)', () => {
 
   afterAll(() => api.close());
 
+  it('reports MongoDB and RabbitMQ as healthy', async () => {
+    const res = await request(api.getHttpServer()).get('/health').expect(200);
+
+    expect(res.body.info).toMatchObject({
+      mongodb: { status: 'up' },
+      rabbitmq: { status: 'up' },
+    });
+  });
+
   it('answers 202 long before the slow processing finishes', async () => {
     const external = new FakeExternal(() => sleep(1500));
     workers.push(await startWorker(external));

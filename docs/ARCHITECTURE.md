@@ -14,24 +14,41 @@
 
 ## Components
 
-```
-sender --POST--> API process --publish + confirm--> RabbitMQ --deliver--> Worker process --> External system
-                    |                                  ^  |                    |
-                    | 202 {eventKey}                   |  +-- retry queues     v
-                    v                                  |      dead-letter     MongoDB (events)
-                 sender                                +----- queue           source of truth for state/result
+```mermaid
+flowchart LR
+    sender([Sender])
+    api[API process]
+    worker[Worker process]
+    external[External system]
+    mongo[("MongoDB<br/>source of truth for<br/>state and results")]
+
+    subgraph rabbit [RabbitMQ]
+        queues[Partition queues]
+        retry[Retry queues]
+        dead[Dead-letter queue]
+    end
+
+    sender -->|POST /events| api
+    api -->|202 Accepted| sender
+    api -->|publish + confirm| queues
+    queues -->|deliver| worker
+    worker --> external
+    worker -->|claim, result| mongo
+    worker -->|failed, attempts left| retry
+    retry -->|after delay| queues
+    worker -->|attempts exhausted| dead
 ```
 
 | Component | Responsibility |
 |---|---|
 | API process (`src/main.ts`) | Validates the body (Zod), computes the event key, publishes to RabbitMQ (persistent + publisher confirm), answers 202 only after the confirm. Serves `GET /events/:key`, the OpenAPI document and Scalar. Does no processing and no database write on the request path. |
 | Worker process (`src/worker.ts`) | Consumes the partition queues with manual acks, claims each event in MongoDB, calls the external system, records the result, decides retry / dead-letter. |
-| RabbitMQ | Reliable asynchronous delivery, per-patient serialisation (partition queues), delayed retries (TTL queues), dead-letter queue. |
+| RabbitMQ (why not Kafka: [below](#why-rabbitmq-and-why-not-kafka)) | Reliable asynchronous delivery, per-patient serialisation (partition queues), delayed retries (TTL queues), dead-letter queue. |
 | MongoDB (`events` collection) | The only store of event state and result. A unique index on `eventKey` is the idempotency guarantee. |
 
 Code layout: `events/` (schema, key, repository = every state transition),
 `messaging/` (topology + broker), `ingest/` (HTTP), `processing/` (consumer,
-processor, simulated external system), `config/`.
+processor, simulated external system), `health/` (`GET /health`), `config/`.
 
 ## Event flow
 
@@ -120,6 +137,37 @@ What was not built: a reorder buffer (hold events for a time window, process by 
 - Graceful shutdown (deploys): consumers are cancelled, in-flight events are drained (up to 25 s) before the connection closes.
 - API side: the broker connection reconnects automatically and redeclares the topology; while it is down publishes wait up to 5 s and then answer 503.
 
+## Health and logging
+
+**Health.** Both processes serve `GET /health` (the worker listens on
+`WORKER_PORT` only for this), built with `@nestjs/terminus`: it pings MongoDB and
+checks the RabbitMQ connection, answers `200` when both are up and `503` naming
+the broken one otherwise, and reports `shutting_down` during a graceful
+shutdown. Docker Compose uses it as the container healthcheck. One endpoint, not
+separate liveness/readiness: a process whose dependencies are gone cannot do
+useful work, and both clients reconnect by themselves, so the check turns green
+again without a restart.
+
+**Logging.** One JSON object per line on stdout (`level`, `timestamp`,
+`context`, `message` plus flat fields such as `eventKey`, `attempts`,
+`durationMs`, `reason`), filterable with `NEST_LOG_LEVEL`. Logged: process start,
+RabbitMQ and MongoDB connect/disconnect, consumer start and shutdown drain, and
+per event: completed (with duration), attempt failed and retry scheduled, failed
+for good and dead-lettered, lease lost, broker did not confirm (API), plus
+duplicates dropped and deferrals at `debug`.
+
+**What is never logged:** `patientId`, event `data`, results, connection URLs
+(they carry credentials) or raw error objects. Events are identified by
+`eventKey` (a one-way hash, enough to correlate with MongoDB). Malformed messages
+are reported by failing field paths, not by content, because `JSON.parse` errors
+quote a snippet of the payload. The logger also redacts `patientId`, `data` and
+`result` if a future log line passes an object containing them. A unit test
+asserts no processor log contains patient or event data. `lastError` (also logged
+as `reason`) comes from the external system: it must not echo payloads.
+
+Still missing: metrics (queue depth, age of the oldest PENDING event), tracing
+and alerting; they need an observability backend and were left out of scope.
+
 ## Scaling
 
 The work is I/O wait, so one worker process handles hundreds of concurrent events
@@ -132,6 +180,48 @@ ranges per worker (a small change in `EventConsumer`).
 
 `PARTITIONS` is part of the routing: changing it re-maps patients. Change it only
 with drained queues (otherwise a patient's old and new messages could overlap).
+
+## Why RabbitMQ, and why not Kafka
+
+Kafka is a serious alternative and the comparison is worth stating. Partitioned
+by `patientId`, a Kafka topic gives per-patient ordering natively: the same key
+always lands in the same partition, a consumer group assigns each partition to
+exactly one worker, and adding workers really shares the load. That is a more
+natural fit for the ordering requirement than what is built here (256 queues +
+single active consumer, where extra workers are only standbys). Kafka also keeps
+a replayable log.
+
+RabbitMQ was chosen deliberately, because this workload is **job processing, not
+event streaming**:
+
+- **Per-message acknowledgement, retry and dead-lettering are built into the
+  broker.** Each event is acked, retried with a delay (TTL queues) or parked
+  (dead-letter queue) on its own. Kafka can do the same, but consumption is
+  per partition and progress is an offset: a failed record holds back its
+  partition unless the design moves it aside, typically to a retry topic. A
+  delayed retry then needs a topic per delay and application logic to wait
+  before reprocessing. It is a common pattern, but more topology and code than
+  RabbitMQ's TTL queues and dead-letter exchanges.
+- **Slow work (~5 s per event) fits ack-based consumption.** In Kafka a consumer
+  that is slow between polls triggers rebalances, so `max.poll.interval.ms` and
+  batch sizes have to be tuned around the external system's latency.
+- **Scale does not need Kafka.** 1000 events/min is ~17 per second; the cost is
+  waiting on I/O, not broker throughput.
+- **Simpler to operate and review:** one broker, a management UI to inspect
+  queues and the dead-letter queue, no partition planning for a log whose history
+  is not needed (MongoDB is the record of what happened).
+
+What this costs: ordering is assembled by the application (partition queues,
+single active consumer) instead of coming from the broker's model; standby
+workers do not balance load; and once acked, a message cannot be replayed.
+Kafka would not remove the out-of-order problem either: it orders by arrival
+within a partition, not by the sender's `ts` (see "Ordering and concurrency").
+
+Revisit the choice if throughput grows by orders of magnitude, if replay or
+several independent consumers of the same stream become requirements, or if
+per-partition load balancing across many workers is needed. The switch is
+contained: `messaging/` and `EventConsumer` change, while `EventProcessor` and
+`EventsRepository` do not, because idempotency lives in MongoDB, not in the broker.
 
 ## Trade-offs accepted
 
@@ -151,5 +241,5 @@ with drained queues (otherwise a patient's old and new messages could overlap).
 - Provider event ID / `Idempotency-Key` support, keeping the fingerprint as fallback.
 - Per-patient fencing in MongoDB for the zombie-consumer case (broker thinks a consumer is dead while it still runs: two events of one patient could briefly overlap; per-event state stays correct thanks to fencing).
 - Partition ranges per worker, quorum queues, a replay tool for the dead-letter queue.
-- Health/readiness endpoints, metrics (queue depth, attempts, age of oldest PENDING) and structured logging.
+- Metrics and tracing (queue depth, attempts, age of the oldest PENDING event).
 - Pass an idempotency key to the real external system.

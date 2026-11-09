@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { envSchema } from './config/env.js';
+import { HealthModule } from './health/health.module.js';
 import { mongoOptions } from './events/mongo.js';
 import { ProcessingModule } from './processing/processing.module.js';
 
@@ -10,6 +11,7 @@ import { ProcessingModule } from './processing/processing.module.js';
     ConfigModule.forRoot({ isGlobal: true, validationSchema: envSchema }),
     MongooseModule.forRootAsync(mongoOptions),
     ProcessingModule,
+    HealthModule,
   ],
 })
 export class WorkerModule {}

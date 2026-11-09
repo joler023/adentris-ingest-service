@@ -8,6 +8,7 @@ const delayList = z
 export const envSchema = z
   .object({
     PORT: z.coerce.number().int().positive().default(3000),
+    WORKER_PORT: z.coerce.number().int().positive().default(3001),
     MONGODB_URI: z.string().default('mongodb://localhost:27017/ingest'),
     RABBITMQ_URL: z.string().default('amqp://localhost:5672'),
     PARTITIONS: z.coerce.number().int().positive().default(256),

@@ -30,8 +30,15 @@ export class EventProcessor {
 
   async process(event: EventMessage): Promise<Outcome> {
     const claim = await this.events.claim(event, this.leaseMs);
-    if (claim.kind === 'done') return 'ack';
-    if (claim.kind === 'busy') return 'retry';
+    const { eventKey } = event;
+    if (claim.kind === 'done') {
+      this.logger.debug('Already finished, message dropped', { eventKey });
+      return 'ack';
+    }
+    if (claim.kind === 'busy') {
+      this.logger.debug('Held by another worker, deferred', { eventKey });
+      return 'retry';
+    }
 
     const { attempts } = claim;
     // Attempts also grow when a worker dies mid-processing (lease takeover): a
@@ -44,6 +51,7 @@ export class EventProcessor {
       );
     }
 
+    const started = performance.now();
     let result: Record<string, unknown>;
     try {
       result = await this.external.process(event);
@@ -55,11 +63,15 @@ export class EventProcessor {
       );
     }
 
-    return this.record(
-      event,
-      await this.events.complete(event, attempts, result),
-      'complete',
-    );
+    const applied = await this.events.complete(event, attempts, result);
+    if (applied) {
+      this.logger.log('Event completed', {
+        eventKey,
+        attempts,
+        durationMs: Math.round(performance.now() - started),
+      });
+    }
+    return this.record(event, applied, 'complete');
   }
 
   private async fail(
@@ -68,9 +80,11 @@ export class EventProcessor {
     error: string,
   ): Promise<Outcome> {
     if (attempts >= this.maxAttempts) {
-      this.logger.error(
-        `Event ${event.eventKey} failed ${attempts} times, dead-lettering: ${error}`,
-      );
+      this.logger.error('Event failed for good, dead-lettering', {
+        eventKey: event.eventKey,
+        attempts,
+        reason: error,
+      });
       const applied = await this.events.markFailed(
         event.eventKey,
         attempts,
@@ -78,9 +92,12 @@ export class EventProcessor {
       );
       return this.record(event, applied, 'mark failed', 'dead-letter');
     }
-    this.logger.warn(
-      `Event ${event.eventKey} attempt ${attempts}/${this.maxAttempts} failed: ${error}`,
-    );
+    this.logger.warn('Attempt failed, retry scheduled', {
+      eventKey: event.eventKey,
+      attempts,
+      maxAttempts: this.maxAttempts,
+      reason: error,
+    });
     const applied = await this.events.scheduleRetry(
       event.eventKey,
       attempts,
@@ -97,9 +114,10 @@ export class EventProcessor {
     outcome: Outcome = 'ack',
   ): Outcome {
     if (applied) return outcome;
-    this.logger.warn(
-      `Event ${event.eventKey}: could not ${action}, lease was lost to another worker`,
-    );
+    this.logger.warn('Lease lost to another worker, result discarded', {
+      eventKey: event.eventKey,
+      action,
+    });
     return 'ack';
   }
 }

@@ -1,11 +1,18 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import type { CreateEventDto } from '../events/create-event.schema.js';
 import { eventKeyOf } from '../events/event-key.js';
 import type { EventMessage } from '../events/event-message.js';
+import { reasonOf } from '../logger.js';
 import { BrokerService } from '../messaging/broker.service.js';
 
 @Injectable()
 export class IngestService {
+  private readonly logger = new Logger(IngestService.name);
+
   constructor(private readonly broker: BrokerService) {}
 
   /**
@@ -25,6 +32,10 @@ export class IngestService {
     try {
       await this.broker.publishEvent(message);
     } catch (error) {
+      this.logger.error('Event not accepted: broker did not confirm', {
+        eventKey: message.eventKey,
+        reason: reasonOf(error),
+      });
       throw new ServiceUnavailableException(
         'Event could not be accepted, retry later',
         { cause: error },

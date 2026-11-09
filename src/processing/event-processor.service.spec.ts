@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.js';
 import type { EventMessage } from '../events/event-message.js';
@@ -9,7 +10,7 @@ const event: EventMessage = {
   eventKey: 'k1',
   patientId: 'p1',
   type: 'heart-rate',
-  data: {},
+  data: { secret: 'reading-9f3a' },
   ts: '2026-01-01T00:00:00.000Z',
   receivedAt: '2026-01-01T00:00:01.000Z',
 };
@@ -107,5 +108,24 @@ describe('EventProcessor', () => {
     events.complete.mockResolvedValue(false);
 
     await expect(processor.process(event)).resolves.toBe('ack');
+  });
+  it('never logs patient identifiers or event data', async () => {
+    const logged: unknown[] = [];
+    for (const level of ['log', 'debug', 'warn', 'error'] as const) {
+      vi.spyOn(Logger.prototype, level).mockImplementation((...args) => {
+        logged.push(args);
+      });
+    }
+    const failing = setup({ kind: 'acquired', attempts: 3 });
+    failing.external.process.mockRejectedValue(new Error('boom'));
+
+    await setup({ kind: 'acquired', attempts: 1 }).processor.process(event);
+    await setup({ kind: 'done' }).processor.process(event);
+    await setup({ kind: 'busy' }).processor.process(event);
+    await failing.processor.process(event);
+
+    expect(logged.length).toBeGreaterThan(0);
+    expect(JSON.stringify(logged)).not.toMatch(/p1|reading-9f3a/);
+    vi.restoreAllMocks();
   });
 });
