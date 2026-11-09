@@ -1,0 +1,46 @@
+# `docker compose up -d mongo rabbitmq` -> infrastructure only (run the app with bun/npm).
+# `docker compose up --build`           -> infrastructure + api + worker.
+services:
+  mongo:
+    image: mongo:8
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    ports: ["5672:5672", "15672:15672"]
+    volumes: [rabbitmq-data:/var/lib/rabbitmq]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  api:
+    build: .
+    command: ["node", "dist/main.js"]
+    environment: &app-env
+      MONGODB_URI: mongodb://mongo:27017/ingest
+      RABBITMQ_URL: amqp://rabbitmq:5672
+    ports: ["3000:3000"]
+    depends_on:
+      mongo: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  worker:
+    build: .
+    command: ["node", "dist/worker.js"]
+    environment: *app-env
+    stop_grace_period: 30s
+    depends_on:
+      mongo: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+volumes:
+  mongo-data:
+  rabbitmq-data:
